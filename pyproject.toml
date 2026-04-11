@@ -61,4 +61,8 @@ packages = ["src/qd_browser"]
 package = true
 
 [dependency-groups]
-dev = ["hatchling>=1.26.0", "build>=1.2.0"]
+dev = [
+    "hatchling>=1.26.0",
+ "build>=1.2.0",
+ "twine>=6.2.0",
+]

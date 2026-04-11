@@ -1,5 +1,10 @@
 # qd-browser
 
+[![PyPI version](https://img.shields.io/pypi/v/qd-browser.svg)](https://pypi.org/project/qd-browser/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/qd-browser.svg)](https://pypi.org/project/qd-browser/)
+[![License](https://img.shields.io/pypi/l/qd-browser.svg)](https://pypi.org/project/qd-browser/)
+[![Python versions](https://img.shields.io/pypi/pyversions/qd-browser.svg)](https://pypi.org/project/qd-browser/)
+
 基于 Playwright 的综合爬虫 CLI 工具。
 
 ## 功能特性
@@ -167,37 +172,29 @@ uv run qd-browser web-download <搜索关键词>
 #### `llm-download` - 使用 NVIDIA 免费模型生成内容
 
 ```bash
-# 基本使用
+# 基本使用 - 普通内容生成
 uv run qd-browser llm-download "写一篇关于人工智能的文章"
 
-# 带系统提示词
-uv run qd-browser llm-download "解释量子计算" -s "你是一个科普作家"
+# 爬取任务模式 - LLM 自动识别并执行爬取
+uv run qd-browser llm-download "帮我找一些企业编写ESG的官方指南"
 
-# 自定义文件名前缀
-uv run qd-browser llm-download "写代码" -f "python_tutorial"
-
-# 调整生成参数
-uv run qd-browser llm-download "创作诗歌" -m 8192 -t 0.9 -p 0.95
+# 指定输出目录
+uv run qd-browser llm-download "写一首诗" --output-dir ./my-docs
 
 # 调试模式
 uv run qd-browser llm-download "测试" --debug
 ```
 
-使用 NVIDIA API Catalog 提供的免费模型，支持自动 fallback。
-默认模型池（按优先级）：
-1. meta/llama-3.1-405b-instruct
-2. meta/llama-3.1-70b-instruct
-3. meta/llama-3.1-8b-instruct
-4. meta/llama-3-70b-instruct
-5. meta/llama-3-8b-instruct
+支持两种模式：
+1. **普通内容生成**：直接根据提示词生成内容
+2. **爬取任务模式**：如果提示词包含爬取需求，会自动提取域名和关键词，
+   然后调用 domain-download 进行搜索和爬取
+
+使用 NVIDIA API Catalog 提供的免费模型，**自动从 API 获取当前可用模型**，
+按优先级排序后使用前 5 个模型，支持自动 fallback。
 
 选项:
 - `--output-dir TEXT`: 输出目录（默认: ./output）
-- `--system-prompt, -s TEXT`: 系统提示词（可选）
-- `--filename-prefix, -f TEXT`: 文件名前缀（可选）
-- `--max-tokens, -m INTEGER`: 最大生成 token 数（默认: 4096）
-- `--temperature, -t FLOAT`: 温度参数 0.0-2.0（默认: 0.7）
-- `--top-p, -p FLOAT`: top_p 参数 0.0-1.0（默认: 0.9）
 - `--language TEXT`: 语言：zh（中文）或 en（英文）（默认: zh）
 - `--debug`: 调试模式，显示详细错误信息
 
