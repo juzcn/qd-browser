@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/pypi/l/qd-browser.svg)](https://pypi.org/project/qd-browser/)
 [![Python versions](https://img.shields.io/pypi/pyversions/qd-browser.svg)](https://pypi.org/project/qd-browser/)
 
-基于 Playwright 的综合爬虫 CLI 工具。
+基于 Playwright 的综合爬虫 CLI 工具，可以按URL、域名和提示词爬取网页和下载文件。
 
 ## 功能特性
 
@@ -16,7 +16,7 @@
 - **搜索引擎集成**: Serper + 百度搜索，API 失败自动 fallback 到浏览器搜索
 - **URL 去重**: 全局访问历史记录，支持跳过已访问 URL
 - **自动域名子目录**: 自动从 URL 解析域名作为输出子目录
-- **LLM 内容生成**: 使用 NVIDIA 免费模型（Llama 3.1 等）生成内容，支持自动 fallback
+- **智能 LLM 爬取**: 使用 NVIDIA 免费模型（Llama 3.1 等）理解用户意图，自动提取搜索关键词、域名列表和输出目录，然后调用 domain-download 进行批量爬取，不花一分钱！
 
 ## 安装
 
@@ -169,29 +169,35 @@ uv run qd-browser web-download <搜索关键词>
 - `--debug`: 调试模式，保存原始 HTML
 - `--not-skip`: 不跳过已访问的 URL（强制重新处理）
 
-#### `llm-download` - 使用 NVIDIA 免费模型生成内容
+#### `llm-download` - 智能 LLM 爬取（免费使用 NVIDIA 大模型）
 
 ```bash
-# 基本使用 - 普通内容生成
-uv run qd-browser llm-download "写一篇关于人工智能的文章"
+# 智能爬取示例 - 用自然语言描述你的需求
+uv run qd-browser llm-download "去上交所、深交所和北交所网站爬取esg编写指南"
 
-# 爬取任务模式 - LLM 自动识别并执行爬取
+# 另一个示例
 uv run qd-browser llm-download "帮我找一些企业编写ESG的官方指南"
 
 # 指定输出目录
-uv run qd-browser llm-download "写一首诗" --output-dir ./my-docs
+uv run qd-browser llm-download "去证监会网站找最新的公告" --output-dir ./my-docs
 
 # 调试模式
 uv run qd-browser llm-download "测试" --debug
 ```
 
-支持两种模式：
-1. **普通内容生成**：直接根据提示词生成内容
-2. **爬取任务模式**：如果提示词包含爬取需求，会自动提取域名和关键词，
-   然后调用 domain-download 进行搜索和爬取
+**工作原理**：
+1. 使用 NVIDIA API Catalog 提供的免费大模型（Llama 3.1 等）理解你的自然语言需求
+2. 自动提取：
+   - **搜索关键词**（query）
+   - **域名列表**（支持多个域名）
+   - **输出目录**（可选）
+3. 自动调用 `domain-download` 对每个域名进行搜索和批量爬取
+4. **完全免费**，用户只需提供 NVIDIA API Key，不花一分钱！
 
-使用 NVIDIA API Catalog 提供的免费模型，**自动从 API 获取当前可用模型**，
-按优先级排序后使用前 5 个模型，支持自动 fallback。
+**模型池**：
+- 自动从 NVIDIA API 获取当前可用模型
+- 按优先级排序后使用前 5 个最强模型
+- 支持自动 fallback
 
 选项:
 - `--output-dir TEXT`: 输出目录（默认: ./output）
