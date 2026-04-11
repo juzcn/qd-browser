@@ -29,6 +29,9 @@ pip install qd-browser
 # 使用 uv 安装
 uv pip install qd-browser
 
+# 使用 uv add 安装（项目依赖）
+uv add qd-browser
+
 # 安装后需要安装 Playwright 浏览器
 playwright install chromium
 ```
