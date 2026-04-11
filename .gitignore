@@ -150,6 +150,9 @@ cython_debug/
 # Claude Code settings
 .claude/
 
+# VSCode settings
+.vscode/
+
 # Output directory
 output/
 
