@@ -14,6 +14,7 @@ from .config import settings
 from .crawler import Crawler
 from .downloader import Downloader
 from .history import get_history, get_user_config_dir
+from .llm import llm_download
 from .search import (
     baidu_search,
     filter_by_domain,
@@ -157,6 +158,199 @@ async def process_single_url(
         settings.domain = original_domain
 
 
+async def process_single_domain(
+    domain: str,
+    query: str,
+    output_dir: str = "./output",
+    language: str = "zh",
+    hash_url: bool = False,
+    debug: bool = False,
+    not_skip: bool = False,
+) -> dict[str, Any]:
+    """处理单个域名的搜索和爬取
+
+    Args:
+        domain: 要爬取的域名
+        query: 搜索关键词
+        output_dir: 输出目录
+        language: 语言设置
+        hash_url: 是否使用 URL 哈希
+        debug: 是否调试模式
+        not_skip: 是否不跳过已访问的 URL
+
+    Returns:
+        包含处理统计的字典
+    """
+    # 设置全局配置
+    settings.output_dir = output_dir
+    settings.language = language
+    settings.hash_url = hash_url
+    if debug:
+        settings.debug = debug
+
+    # 先创建并记录最顶层的 output-dir
+    history = get_history()
+    output_path = Path(output_dir).resolve()
+    if not output_path.exists():
+        output_path.mkdir(parents=True, exist_ok=True)
+        history.add_created_dir(output_path)
+
+    # 加载 .env 文件
+    load_env()
+
+    # 验证域名的可访问性并获取 title
+    console.print(f"[blue]验证域名可访问性: {domain}[/blue]")
+    page_title = ""
+    try:
+        is_accessible, page_title, accessed_url, status_code, ssl_skipped = await verify_domain_accessibility(
+            domain
+        )
+        if is_accessible:
+            if ssl_skipped:
+                if page_title:
+                    console.print(
+                        f"[yellow]域名可访问（跳过 SSL 验证）: {accessed_url} (HTTP {status_code}) - {page_title}[/yellow]"
+                    )
+                else:
+                    console.print(
+                        f"[yellow]域名可访问（跳过 SSL 验证）: {accessed_url} (HTTP {status_code})[/yellow]"
+                    )
+            else:
+                if page_title:
+                    console.print(
+                        f"[green]域名可访问: {accessed_url} (HTTP {status_code}) - {page_title}[/green]"
+                    )
+                else:
+                    console.print(f"[green]域名可访问: {accessed_url} (HTTP {status_code})[/green]")
+    except Exception as e:
+        console.print(f"[yellow]警告: 域名访问验证失败: {e}[/yellow]")
+
+    # 搜索
+    console.print()
+    console.print("[blue]========== 搜索 ==========[/blue]")
+    search_query = f"{query} site:{domain}"
+    console.print(f"搜索关键词: {search_query}")
+
+    # 搜索：Serper 主搜索 + 百度补全
+    serper_results = []
+    baidu_results = []
+
+    # Serper 搜索（主）
+    try:
+        console.print("[blue]正在使用 Serper 搜索...[/blue]")
+        serper_results = await serper_search(search_query, count=10)
+        console.print(f"[green]Serper 搜索返回 {len(serper_results)} 条结果[/green]")
+    except Exception as e:
+        console.print(f"[yellow]Serper 搜索失败: {e}[/yellow]")
+
+    # 百度搜索（补全）
+    try:
+        console.print("[blue]正在使用百度搜索...[/blue]")
+        baidu_results = await baidu_search(search_query, count=10)
+        console.print(f"[green]百度搜索返回 {len(baidu_results)} 条结果[/green]")
+    except Exception as e:
+        console.print(f"[yellow]百度搜索失败: {e}[/yellow]")
+
+    # 合并去重
+    all_results = merge_results([serper_results, baidu_results])
+    console.print(f"[green]合并后共 {len(all_results)} 条结果[/green]")
+
+    # Debug 模式：保存搜索结果到文件
+    if settings.debug:
+        debug_path = save_search_results_debug(
+            settings.output_dir, serper_results, baidu_results, all_results
+        )
+        console.print(f"[blue]Debug: 搜索结果已保存到 {debug_path}[/blue]")
+
+    # 按域名过滤
+    filtered = filter_by_domain(all_results, domain)
+    console.print(f"[green]过滤后共 {len(filtered)} 条 {domain} 的结果[/green]")
+
+    if not filtered:
+        console.print("[yellow]未找到相关结果[/yellow]")
+        return {
+            "domain": domain,
+            "query": query,
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+
+    # 显示搜索结果
+    console.print()
+    for i, item in enumerate(filtered[:20], 1):
+        console.print(
+            f"[cyan]{i}.[/cyan] [yellow]{item.get('source', '')}[/yellow] [magenta]{item.get('date', '')}[/magenta]"
+        )
+        console.print(f"    [green]{item.get('title', '')}[/green]")
+        console.print(f"    [blue]{item.get('url', '')}[/blue]")
+        console.print()
+    if len(filtered) > 20:
+        console.print(f"... 还有 {len(filtered) - 20} 条")
+
+    # 逐个处理 URL
+    console.print()
+    console.print("[blue]========== 开始处理 ==========[/blue]")
+    console.print(f"共 {len(filtered)} 个链接待处理")
+
+    success_count = 0
+    fail_count = 0
+    skipped_count = 0
+
+    for i, item in enumerate(filtered, 1):
+        url = item.get("url", "")
+        if not url:
+            continue
+
+        # 检查是否跳过（默认跳过成功状态的，除非 --not-skip）
+        if not not_skip and history.has_url(url):
+            entry = history.get_entry(url)
+            if entry and entry.status == "success":
+                console.print(
+                    f"[yellow][{i}/{len(filtered)}] 跳过已访问 ({entry.status}): {url}[/yellow]"
+                )
+                skipped_count += 1
+                continue
+
+        console.print()
+        console.print(f"[blue][{i}/{len(filtered)}] 处理: {url}[/blue]")
+
+        try:
+            await process_single_url(
+                url,
+                url_title=item.get("title", ""),
+                skip_visited=False,  # 这里已经检查过了
+                domain=domain,
+                search_date=item.get("date"),
+            )
+            success_count += 1
+        except Exception as e:
+            console.print(f"[red]处理失败: {e}[/red]")
+            fail_count += 1
+
+    # 显示统计
+    console.print()
+    table = Table(title="处理统计")
+    table.add_column("项目", style="cyan")
+    table.add_column("数量", style="green")
+    table.add_row("总计", str(len(filtered)))
+    if skipped_count > 0:
+        table.add_row("跳过", str(skipped_count), style="yellow")
+    table.add_row("成功", str(success_count))
+    table.add_row("失败", str(fail_count))
+    console.print(table)
+
+    return {
+        "domain": domain,
+        "query": query,
+        "total": len(filtered),
+        "success": success_count,
+        "failed": fail_count,
+        "skipped": skipped_count,
+    }
+
+
 app = typer.Typer(
     name="qd-browser",
     help="基于 Playwright 的综合爬虫 CLI 工具",
@@ -252,175 +446,24 @@ def domain_download(
     not_skip: bool = typer.Option(False, "--not-skip", help="不跳过已访问的 URL（强制重新处理）"),
 ):
     """批量爬取多个网页（包含附件）"""
-    settings.output_dir = output_dir
-    settings.language = language
-    settings.hash_url = hash_url
-    if debug:
-        settings.debug = debug
-
-    # 先创建并记录最顶层的 output-dir
-    history = get_history()
-    output_path = Path(output_dir).resolve()
-    if not output_path.exists():
-        output_path.mkdir(parents=True, exist_ok=True)
-        history.add_created_dir(output_path)
-
-    # 加载 .env 文件
-    load_env()
-
-    # 第一步：用 tldextract 解析 domain-name
+    # 用 tldextract 解析 domain-name
     extracted = tldextract.extract(input_value)
     domain = extracted.top_domain_under_public_suffix or input_value
     console.print(f"[blue]解析域名: {domain}[/blue]")
 
-    # 第二步：验证域名的可访问性并获取 title
-    console.print("[blue]验证域名可访问性...[/blue]")
-    page_title = ""
-    try:
-        is_accessible, page_title, accessed_url, status_code, ssl_skipped = asyncio.run(
-            verify_domain_accessibility(domain)
+    async def _run():
+        return await process_single_domain(
+            domain=domain,
+            query=query,
+            output_dir=output_dir,
+            language=language,
+            hash_url=hash_url,
+            debug=debug,
+            not_skip=not_skip,
         )
-        if is_accessible:
-            if ssl_skipped:
-                if page_title:
-                    console.print(
-                        f"[yellow]域名可访问（跳过 SSL 验证）: {accessed_url} (HTTP {status_code}) - {page_title}[/yellow]"
-                    )
-                else:
-                    console.print(
-                        f"[yellow]域名可访问（跳过 SSL 验证）: {accessed_url} (HTTP {status_code})[/yellow]"
-                    )
-            else:
-                if page_title:
-                    console.print(
-                        f"[green]域名可访问: {accessed_url} (HTTP {status_code}) - {page_title}[/green]"
-                    )
-                else:
-                    console.print(f"[green]域名可访问: {accessed_url} (HTTP {status_code})[/green]")
-    except Exception as e:
-        console.print(f"[yellow]警告: 域名访问验证失败: {e}[/yellow]")
-
-    # 第三步：搜索
-    console.print()
-    console.print("[blue]========== 搜索 ==========[/blue]")
-    search_query = f"{query} site:{domain}"
-    console.print(f"搜索关键词: {search_query}")
-
-    # 搜索：Serper 主搜索 + 百度补全
-    serper_results = []
-    baidu_results = []
-
-    # Serper 搜索（主）
-    try:
-        console.print("[blue]正在使用 Serper 搜索...[/blue]")
-
-        async def _search_serper():
-            return await serper_search(search_query, count=10)
-
-        serper_results = asyncio.run(_search_serper())
-        console.print(f"[green]Serper 搜索返回 {len(serper_results)} 条结果[/green]")
-    except Exception as e:
-        console.print(f"[yellow]Serper 搜索失败: {e}[/yellow]")
-
-    # 百度搜索（补全）
-    try:
-        console.print("[blue]正在使用百度搜索...[/blue]")
-
-        async def _search_baidu():
-            return await baidu_search(search_query, count=10)
-
-        baidu_results = asyncio.run(_search_baidu())
-        console.print(f"[green]百度搜索返回 {len(baidu_results)} 条结果[/green]")
-    except Exception as e:
-        console.print(f"[yellow]百度搜索失败: {e}[/yellow]")
-
-    # 合并去重
-    all_results = merge_results([serper_results, baidu_results])
-    console.print(f"[green]合并后共 {len(all_results)} 条结果[/green]")
-
-    # Debug 模式：保存搜索结果到文件
-    if settings.debug:
-        debug_path = save_search_results_debug(
-            settings.output_dir, serper_results, baidu_results, all_results
-        )
-        console.print(f"[blue]Debug: 搜索结果已保存到 {debug_path}[/blue]")
-
-    # 按域名过滤
-    filtered = filter_by_domain(all_results, domain)
-    console.print(f"[green]过滤后共 {len(filtered)} 条 {domain} 的结果[/green]")
-
-    if not filtered:
-        console.print("[yellow]未找到相关结果[/yellow]")
-        return
-
-    # 显示搜索结果
-    console.print()
-    for i, item in enumerate(filtered[:20], 1):
-        console.print(
-            f"[cyan]{i}.[/cyan] [yellow]{item.get('source', '')}[/yellow] [magenta]{item.get('date', '')}[/magenta]"
-        )
-        console.print(f"    [green]{item.get('title', '')}[/green]")
-        console.print(f"    [blue]{item.get('url', '')}[/blue]")
-        console.print()
-    if len(filtered) > 20:
-        console.print(f"... 还有 {len(filtered) - 20} 条")
-
-    # 逐个处理 URL
-    console.print()
-    console.print("[blue]========== 开始处理 ==========[/blue]")
-    console.print(f"共 {len(filtered)} 个链接待处理")
-
-    async def _process_all():
-        success_count = 0
-        fail_count = 0
-        skipped_count = 0
-
-        history = get_history()
-        for i, item in enumerate(filtered, 1):
-            url = item.get("url", "")
-            if not url:
-                continue
-
-            # 检查是否跳过（默认跳过成功状态的，除非 --not-skip）
-            if not not_skip and history.has_url(url):
-                entry = history.get_entry(url)
-                if entry and entry.status == "success":
-                    console.print(
-                        f"[yellow][{i}/{len(filtered)}] 跳过已访问 ({entry.status}): {url}[/yellow]"
-                    )
-                    skipped_count += 1
-                    continue
-
-            console.print()
-            console.print(f"[blue][{i}/{len(filtered)}] 处理: {url}[/blue]")
-
-            try:
-                await process_single_url(
-                    url,
-                    url_title=item.get("title", ""),
-                    skip_visited=False,  # 这里已经检查过了
-                    domain=domain,
-                    search_date=item.get("date"),
-                )
-                success_count += 1
-            except Exception as e:
-                console.print(f"[red]处理失败: {e}[/red]")
-                fail_count += 1
-
-        # 显示统计
-        console.print()
-        table = Table(title="处理统计")
-        table.add_column("项目", style="cyan")
-        table.add_column("数量", style="green")
-        table.add_row("总计", str(len(filtered)))
-        if skipped_count > 0:
-            table.add_row("跳过", str(skipped_count), style="yellow")
-        table.add_row("成功", str(success_count))
-        table.add_row("失败", str(fail_count))
-        console.print(table)
 
     try:
-        asyncio.run(_process_all())
+        asyncio.run(_run())
     except Exception as e:
         if settings.debug:
             console.print_exception()
@@ -587,6 +630,133 @@ def web_download(
 
     try:
         asyncio.run(_process_all())
+    except Exception as e:
+        if settings.debug:
+            console.print_exception()
+        else:
+            console.print(f"[red]错误: {e}[/red]")
+        raise typer.Exit(1)
+
+
+def crawl_task_callback(
+    crawl_info: dict[str, Any],
+    output_dir: str,
+    language: str,
+) -> dict[str, Any]:
+    """爬取任务回调函数
+
+    Args:
+        crawl_info: LLM 解析出的爬取任务信息
+        output_dir: 输出目录
+        language: 语言设置
+
+    Returns:
+        包含所有域名处理结果的字典
+    """
+    domains = crawl_info.get("domains", [])
+    query = crawl_info.get("query", "")
+    crawl_output_dir = crawl_info.get("output_dir") or output_dir
+
+    if not domains or not query:
+        return {"success": False, "error": "缺少域名或搜索关键词"}
+
+    console.print()
+    console.print(f"[green]========== 开始爬取任务 ==========[/green]")
+    console.print(f"[cyan]域名列表: {domains}[/cyan]")
+    console.print(f"[cyan]搜索关键词: {query}[/cyan]")
+    console.print(f"[cyan]输出目录: {crawl_output_dir}[/cyan]")
+
+    all_results = []
+
+    async def _run_all():
+        for domain in domains:
+            console.print()
+            console.print(f"[blue]========== 处理域名: {domain} ==========[/blue]")
+            try:
+                result = await process_single_domain(
+                    domain=domain,
+                    query=query,
+                    output_dir=crawl_output_dir,
+                    language=language,
+                    hash_url=False,
+                    debug=settings.debug,
+                    not_skip=False,
+                )
+                all_results.append(result)
+            except Exception as e:
+                console.print(f"[red]处理域名 {domain} 失败: {e}[/red]")
+                all_results.append({
+                    "domain": domain,
+                    "success": False,
+                    "error": str(e),
+                })
+
+    try:
+        asyncio.run(_run_all())
+    except Exception as e:
+        console.print(f"[red]爬取任务执行失败: {e}[/red]")
+        return {"success": False, "error": str(e), "results": all_results}
+
+    # 显示总体统计
+    console.print()
+    console.print(f"[green]========== 爬取任务完成 ==========[/green]")
+    table = Table(title="总体统计")
+    table.add_column("域名", style="cyan")
+    table.add_column("总计", style="green")
+    table.add_column("成功", style="green")
+    table.add_column("失败", style="red")
+    table.add_column("跳过", style="yellow")
+
+    for result in all_results:
+        table.add_row(
+            result.get("domain", "N/A"),
+            str(result.get("total", 0)),
+            str(result.get("success", 0)),
+            str(result.get("failed", 0)),
+            str(result.get("skipped", 0)),
+        )
+    console.print(table)
+
+    return {"success": True, "results": all_results}
+
+
+@app.command(name="llm-download")
+def llm_download_command(
+    prompt: str = typer.Argument(..., help="LLM 提示词"),
+    output_dir: str = typer.Option("./output", help="输出目录"),
+    language: str = typer.Option(
+        "zh", "--language", help="语言：zh（中文）或 en（英文）"
+    ),
+    debug: bool = typer.Option(False, "--debug", help="调试模式：显示详细错误信息"),
+):
+    """使用 NVIDIA 免费模型生成内容并保存
+
+    支持两种模式：
+    1. 普通内容生成：直接根据提示词生成内容
+    2. 爬取任务模式：如果提示词包含爬取需求，会自动提取域名和关键词，
+       然后调用 domain-download 进行搜索和爬取
+
+    使用 NVIDIA API Catalog 提供的免费模型，自动从 API 获取当前可用模型，
+    按优先级排序后使用前 5 个模型，支持自动 fallback。
+
+    需要配置 NVAPI_KEY 环境变量（可在 .env 文件中设置）。
+    获取 API Key: https://build.nvidia.com/
+    """
+    if debug:
+        settings.debug = debug
+
+    try:
+        result = llm_download(
+            prompt=prompt,
+            output_dir=output_dir,
+            language=language,
+            crawl_task_callback=crawl_task_callback,
+        )
+
+        if not result.get("success"):
+            console.print(f"[red]失败: {result.get('error')}[/red]")
+            raise typer.Exit(1)
+
     except Exception as e:
         if settings.debug:
             console.print_exception()

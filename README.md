@@ -11,15 +11,80 @@
 - **搜索引擎集成**: Serper + 百度搜索，API 失败自动 fallback 到浏览器搜索
 - **URL 去重**: 全局访问历史记录，支持跳过已访问 URL
 - **自动域名子目录**: 自动从 URL 解析域名作为输出子目录
+- **LLM 内容生成**: 使用 NVIDIA 免费模型（Llama 3.1 等）生成内容，支持自动 fallback
 
 ## 安装
 
+### 方式一：从 PyPI 安装（推荐）
+
 ```bash
-# 安装依赖
+# 使用 pip 安装
+pip install qd-browser
+
+# 使用 uv 安装
+uv pip install qd-browser
+
+# 安装后需要安装 Playwright 浏览器
+playwright install chromium
+```
+
+### 方式二：从 Git 安装
+
+```bash
+# 使用 pip 从 Git 安装
+pip install git+https://github.com/juzcn/qd-browser.git
+
+# 安装特定分支
+pip install git+https://github.com/juzcn/qd-browser.git@main
+
+# 安装特定 tag
+pip install git+https://github.com/juzcn/qd-browser.git@v0.1.0
+
+# 使用 uv 从 Git 安装
+uv pip install git+https://github.com/juzcn/qd-browser.git
+
+# 安装后需要安装 Playwright 浏览器
+playwright install chromium
+```
+
+### 方式三：从源码安装（开发者）
+
+```bash
+# 克隆仓库
+git clone https://github.com/juzcn/qd-browser.git
+cd qd-browser
+
+# 使用 uv 安装依赖
 uv sync
 
 # 安装 Playwright Chromium 浏览器
 uv run playwright install chromium
+```
+
+### 方式四：从本地分发包安装
+
+```bash
+# 安装 wheel 包
+pip install qd_browser-0.1.0-py3-none-any.whl
+
+# 或安装源码包
+pip install qd-browser-0.1.0.tar.gz
+
+# 使用 uv 安装
+uv pip install ./dist/qd_browser-0.1.0-py3-none-any.whl
+```
+
+## 开发者：构建分发包
+
+```bash
+# 安装构建工具
+uv sync --dev
+
+# 构建 sdist 和 wheel
+uv run python -m build
+
+# 生成的包在 dist/ 目录下
+ls dist/
 ```
 
 ## 使用方法
@@ -99,6 +164,43 @@ uv run qd-browser web-download <搜索关键词>
 - `--debug`: 调试模式，保存原始 HTML
 - `--not-skip`: 不跳过已访问的 URL（强制重新处理）
 
+#### `llm-download` - 使用 NVIDIA 免费模型生成内容
+
+```bash
+# 基本使用
+uv run qd-browser llm-download "写一篇关于人工智能的文章"
+
+# 带系统提示词
+uv run qd-browser llm-download "解释量子计算" -s "你是一个科普作家"
+
+# 自定义文件名前缀
+uv run qd-browser llm-download "写代码" -f "python_tutorial"
+
+# 调整生成参数
+uv run qd-browser llm-download "创作诗歌" -m 8192 -t 0.9 -p 0.95
+
+# 调试模式
+uv run qd-browser llm-download "测试" --debug
+```
+
+使用 NVIDIA API Catalog 提供的免费模型，支持自动 fallback。
+默认模型池（按优先级）：
+1. meta/llama-3.1-405b-instruct
+2. meta/llama-3.1-70b-instruct
+3. meta/llama-3.1-8b-instruct
+4. meta/llama-3-70b-instruct
+5. meta/llama-3-8b-instruct
+
+选项:
+- `--output-dir TEXT`: 输出目录（默认: ./output）
+- `--system-prompt, -s TEXT`: 系统提示词（可选）
+- `--filename-prefix, -f TEXT`: 文件名前缀（可选）
+- `--max-tokens, -m INTEGER`: 最大生成 token 数（默认: 4096）
+- `--temperature, -t FLOAT`: 温度参数 0.0-2.0（默认: 0.7）
+- `--top-p, -p FLOAT`: top_p 参数 0.0-1.0（默认: 0.9）
+- `--language TEXT`: 语言：zh（中文）或 en（英文）（默认: zh）
+- `--debug`: 调试模式，显示详细错误信息
+
 #### `config` - 配置和历史记录管理
 
 ```bash
@@ -170,6 +272,17 @@ BAIDU_API_KEY_2=xxx
 
 当所有 API key 都失败时，会自动使用浏览器进行搜索作为备用。
 
+### NVIDIA LLM API 配置
+
+使用 `llm-download` 命令需要配置：
+
+```bash
+NVAPI_KEY=nvapi-xxx
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+```
+
+获取 API Key: https://build.nvidia.com/
+
 ### URL 历史记录
 
 全局 URL 访问历史保存在：
@@ -190,7 +303,8 @@ qd-browser/
 │   ├── downloader.py        # 文件下载
 │   ├── utils.py            # 工具函数
 │   ├── search.py           # 搜索功能
-│   └── history.py          # URL 历史记录
+│   ├── history.py          # URL 历史记录
+│   └── llm.py              # LLM 生成（NVIDIA API）
 ├── output/                  # 输出目录
 │   └── attachments/         # 附件下载目录
 ├── pyproject.toml           # 项目配置
@@ -207,3 +321,60 @@ qd-browser/
 - **pydantic-settings**: 配置管理
 - **httpx**: HTTP 客户端
 - **tldextract**: 域名解析
+- **openai**: OpenAI SDK（用于 NVIDIA API）
+- **hatchling**: 构建后端
+
+## 开发者：发布到 PyPI
+
+### 1. 构建分发包
+
+```bash
+# 清理旧的构建
+rm -rf dist/ build/ *.egg-info/
+
+# 构建 sdist 和 wheel
+uv run python -m build
+```
+
+### 2. 上传到 TestPyPI（测试）
+
+```bash
+# 安装 twine
+uv pip install twine
+
+# 上传到 TestPyPI
+uv run twine upload --repository testpypi dist/*
+```
+
+### 3. 从 TestPyPI 测试安装
+
+```bash
+pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ qd-browser
+```
+
+### 4. 上传到 PyPI（正式发布）
+
+```bash
+# 上传到 PyPI
+uv run twine upload dist/*
+```
+
+### PyPI 账号配置
+
+在 `~/.pypirc` 中配置：
+
+```ini
+[distutils]
+index-servers =
+    pypi
+    testpypi
+
+[pypi]
+username = __token__
+password = pypi-你的token
+
+[testpypi]
+repository = https://test.pypi.org/legacy/
+username = __token__
+password = pypi-你的testtoken
+```

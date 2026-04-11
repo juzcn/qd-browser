@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     domain: str | None = None
     hash_url: bool = False
 
+    # LLM 配置
+    llm_max_tokens: int = 4096
+    llm_temperature: float = 0.7
+    llm_top_p: float = 0.9
+
     @property
     def save_html(self) -> bool:
         """是否保存原始 HTML（debug 模式）"""
