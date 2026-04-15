@@ -1,6 +1,8 @@
 """CLI 命令行入口"""
 
 import asyncio
+import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,65 @@ from .search import (
     serper_search,
 )
 from .utils import clean_filename, is_download_url, verify_domain_accessibility
+
+
+# ========================================
+# 智能体友好模式 - 全局状态
+# ========================================
+
+class OutputMode:
+    """输出模式配置"""
+    json: bool = False
+    quiet: bool = False
+    no_color: bool = False
+    _json_result: dict[str, Any] = {}
+    _json_results: list[Any] = []
+
+    @classmethod
+    def reset(cls):
+        """重置状态"""
+        cls.json = False
+        cls.quiet = False
+        cls.no_color = False
+        cls._json_result = {}
+        cls._json_results = []
+
+    @classmethod
+    def set_result(cls, result: dict[str, Any]):
+        """设置最终 JSON 结果"""
+        cls._json_result = result
+
+    @classmethod
+    def add_result(cls, result: dict[str, Any]):
+        """添加中间结果"""
+        cls._json_results.append(result)
+
+    @classmethod
+    def get_output(cls) -> str:
+        """获取最终 JSON 输出"""
+        if cls._json_results:
+            output = {
+                "results": cls._json_results,
+                **cls._json_result
+            }
+        else:
+            output = cls._json_result
+        return json.dumps(output, ensure_ascii=False, indent=2, default=str)
+
+
+def get_console() -> Console:
+    """获取配置好的 Console 实例"""
+    return Console(
+        quiet=OutputMode.quiet,
+        no_color=OutputMode.no_color or OutputMode.json,
+    )
+
+
+def print_json_result():
+    """输出 JSON 结果（如果启用了 JSON 模式）"""
+    if OutputMode.json:
+        print(OutputMode.get_output(), file=sys.stdout)
+
 
 
 def ensure_output_dir(dir_path: str | Path) -> Path:
@@ -78,8 +139,19 @@ async def process_single_url(
     """处理单个 URL：判断是文件还是网页，相应地下载或爬取
 
     注意：如果传入 domain 参数，会临时覆盖 settings.domain
+
+    Returns:
+        结构化结果字典，包含：
+        - url: 处理的 URL
+        - status: success/failed/skipped
+        - type: file/page (如果处理了)
+        - title: 标题
+        - local_path: 本地保存路径
+        - attachment_count: 附件数量
+        - error: 错误信息 (如果失败)
     """
     history = get_history()
+    result_data: dict[str, Any] = {"url": url, "status": "failed"}
 
     # 保存原始 domain，临时覆盖
     original_domain = settings.domain
@@ -96,7 +168,10 @@ async def process_single_url(
             entry = history.get_entry(url)
             if entry and entry.status == "success":
                 console.print(f"[yellow]跳过已访问 URL ({entry.status}): {url}[/yellow]")
-                return None
+                result_data["status"] = "skipped"
+                result_data["title"] = entry.title
+                result_data["local_path"] = str(entry.local_path) if entry.local_path else None
+                return result_data
 
         # 先创建 Crawler（获取 browser_context 用于下载 fallback）
         async with Crawler() as crawler:
@@ -110,22 +185,30 @@ async def process_single_url(
                 )
                 cleaned_title = clean_filename(url_title) if url_title else None
                 history.mark_success(url, title=cleaned_title, local_path=filepath)
-                return None
+                result_data.update({
+                    "status": "success",
+                    "type": "file",
+                    "title": cleaned_title,
+                    "local_path": str(filepath),
+                })
+                return result_data
 
             # 否则按网页爬取
             result = await crawler.crawl_and_save(url, custom_title=url_title)
             # 显示结果摘要
-            console.print()
-            table = Table(title="爬取结果")
-            table.add_column("项目", style="cyan")
-            table.add_column("内容", style="green")
-            table.add_row("标题", result.get("title", "")[:80])
-            table.add_row("URL", result.get("url", ""))
-            table.add_row("附件数量", str(len(result.get("attachments", []))))
-            console.print(table)
+            if not OutputMode.quiet:
+                console.print()
+                table = Table(title="爬取结果")
+                table.add_column("项目", style="cyan")
+                table.add_column("内容", style="green")
+                table.add_row("标题", result.get("title", "")[:80])
+                table.add_row("URL", result.get("url", ""))
+                table.add_row("附件数量", str(len(result.get("attachments", []))))
+                console.print(table)
 
             # 下载附件
             attachments = result.get("attachments", [])
+            downloaded_attachments: list[dict[str, Any]] = []
             if attachments:
                 console.print(f"[blue]开始下载 {len(attachments)} 个附件...[/blue]")
                 output_folder = result["output_folder"]
@@ -137,21 +220,41 @@ async def process_single_url(
                         att_url = attachment.get("url", "")
                         att_text = attachment.get("text", "")
                         cleaned_title = clean_filename(att_text) if att_text else None
+                        att_result = {"url": att_url, "text": att_text}
                         try:
                             filepath = await downloader.download(att_url, link_text=att_text)
                             history.mark_success(att_url, title=cleaned_title, local_path=filepath)
+                            att_result["status"] = "success"
+                            att_result["local_path"] = str(filepath)
                         except Exception as e:
                             history.mark_failed(att_url, error=str(e), title=cleaned_title)
+                            att_result["status"] = "failed"
+                            att_result["error"] = str(e)
+                        downloaded_attachments.append(att_result)
 
             # 记录成功（优先用网页时间，没有则用搜索引擎时间）
             saved_path = result.get("saved_path")
             cleaned_title = result.get("cleaned_title")
             page_date = result.get("page_date") or search_date
             history.mark_success(url, title=cleaned_title, local_path=saved_path, page_date=page_date)
-            return result
+
+            result_data.update({
+                "status": "success",
+                "type": "page",
+                "title": result.get("title"),
+                "cleaned_title": cleaned_title,
+                "local_path": str(saved_path),
+                "output_folder": str(result.get("output_folder")),
+                "attachment_count": len(attachments),
+                "attachments": downloaded_attachments,
+                "page_date": page_date,
+            })
+            return result_data
     except Exception as e:
         cleaned_title = clean_filename(url_title) if url_title else None
         history.mark_failed(url, error=str(e), title=cleaned_title)
+        result_data["error"] = str(e)
+        result_data["title"] = cleaned_title
         raise
     finally:
         # 恢复原始 domain
@@ -179,7 +282,7 @@ async def process_single_domain(
         not_skip: 是否不跳过已访问的 URL
 
     Returns:
-        包含处理统计的字典
+        包含处理统计和所有 URL 结果的字典
     """
     # 设置全局配置
     settings.output_dir = output_dir
@@ -198,6 +301,17 @@ async def process_single_domain(
     # 加载 .env 文件
     load_env()
 
+    # 结果数据
+    result_data: dict[str, Any] = {
+        "domain": domain,
+        "query": query,
+        "total": 0,
+        "success": 0,
+        "failed": 0,
+        "skipped": 0,
+        "url_results": [],
+    }
+
     # 验证域名的可访问性并获取 title
     console.print(f"[blue]验证域名可访问性: {domain}[/blue]")
     page_title = ""
@@ -205,6 +319,9 @@ async def process_single_domain(
         is_accessible, page_title, accessed_url, status_code, ssl_skipped = await verify_domain_accessibility(
             domain
         )
+        result_data["domain_accessible"] = is_accessible
+        result_data["domain_title"] = page_title
+        result_data["domain_url"] = accessed_url
         if is_accessible:
             if ssl_skipped:
                 if page_title:
@@ -224,6 +341,8 @@ async def process_single_domain(
                     console.print(f"[green]域名可访问: {accessed_url} (HTTP {status_code})[/green]")
     except Exception as e:
         console.print(f"[yellow]警告: 域名访问验证失败: {e}[/yellow]")
+        result_data["domain_accessible"] = False
+        result_data["domain_error"] = str(e)
 
     # 搜索
     console.print()
@@ -265,29 +384,27 @@ async def process_single_domain(
     # 按域名过滤
     filtered = filter_by_domain(all_results, domain)
     console.print(f"[green]过滤后共 {len(filtered)} 条 {domain} 的结果[/green]")
+    result_data["search_results_count"] = len(filtered)
 
     if not filtered:
         console.print("[yellow]未找到相关结果[/yellow]")
-        return {
-            "domain": domain,
-            "query": query,
-            "total": 0,
-            "success": 0,
-            "failed": 0,
-            "skipped": 0,
-        }
+        result_data["total"] = 0
+        if OutputMode.json:
+            OutputMode.set_result(result_data)
+        return result_data
 
     # 显示搜索结果
-    console.print()
-    for i, item in enumerate(filtered[:20], 1):
-        console.print(
-            f"[cyan]{i}.[/cyan] [yellow]{item.get('source', '')}[/yellow] [magenta]{item.get('date', '')}[/magenta]"
-        )
-        console.print(f"    [green]{item.get('title', '')}[/green]")
-        console.print(f"    [blue]{item.get('url', '')}[/blue]")
+    if not OutputMode.quiet:
         console.print()
-    if len(filtered) > 20:
-        console.print(f"... 还有 {len(filtered) - 20} 条")
+        for i, item in enumerate(filtered[:20], 1):
+            console.print(
+                f"[cyan]{i}.[/cyan] [yellow]{item.get('source', '')}[/yellow] [magenta]{item.get('date', '')}[/magenta]"
+            )
+            console.print(f"    [green]{item.get('title', '')}[/green]")
+            console.print(f"    [blue]{item.get('url', '')}[/blue]")
+            console.print()
+        if len(filtered) > 20:
+            console.print(f"... 还有 {len(filtered) - 20} 条")
 
     # 逐个处理 URL
     console.print()
@@ -311,44 +428,60 @@ async def process_single_domain(
                     f"[yellow][{i}/{len(filtered)}] 跳过已访问 ({entry.status}): {url}[/yellow]"
                 )
                 skipped_count += 1
+                result_data["url_results"].append({
+                    "url": url,
+                    "status": "skipped",
+                    "title": entry.title,
+                })
                 continue
 
         console.print()
         console.print(f"[blue][{i}/{len(filtered)}] 处理: {url}[/blue]")
 
         try:
-            await process_single_url(
+            url_result = await process_single_url(
                 url,
                 url_title=item.get("title", ""),
                 skip_visited=False,  # 这里已经检查过了
                 domain=domain,
                 search_date=item.get("date"),
             )
+            if url_result:
+                result_data["url_results"].append(url_result)
             success_count += 1
         except Exception as e:
             console.print(f"[red]处理失败: {e}[/red]")
             fail_count += 1
+            result_data["url_results"].append({
+                "url": url,
+                "status": "failed",
+                "error": str(e),
+            })
 
     # 显示统计
     console.print()
-    table = Table(title="处理统计")
-    table.add_column("项目", style="cyan")
-    table.add_column("数量", style="green")
-    table.add_row("总计", str(len(filtered)))
-    if skipped_count > 0:
-        table.add_row("跳过", str(skipped_count), style="yellow")
-    table.add_row("成功", str(success_count))
-    table.add_row("失败", str(fail_count))
-    console.print(table)
+    if not OutputMode.quiet:
+        table = Table(title="处理统计")
+        table.add_column("项目", style="cyan")
+        table.add_column("数量", style="green")
+        table.add_row("总计", str(len(filtered)))
+        if skipped_count > 0:
+            table.add_row("跳过", str(skipped_count), style="yellow")
+        table.add_row("成功", str(success_count))
+        table.add_row("失败", str(fail_count))
+        console.print(table)
 
-    return {
-        "domain": domain,
-        "query": query,
+    result_data.update({
         "total": len(filtered),
         "success": success_count,
         "failed": fail_count,
         "skipped": skipped_count,
-    }
+    })
+
+    if OutputMode.json:
+        OutputMode.set_result(result_data)
+
+    return result_data
 
 
 app = typer.Typer(
@@ -356,22 +489,45 @@ app = typer.Typer(
     help="基于 Playwright 的综合爬虫 CLI 工具",
     add_completion=False,
 )
-console = Console()
+console = get_console()
 
 
-def version_callback(value: bool):
-    if value:
-        console.print(f"qd-browser 版本: {__version__}")
-        raise typer.Exit()
-
-
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     version: bool | None = typer.Option(
-        None, "--version", "-v", callback=version_callback, is_eager=True
+        None, "--version", "-v", help="显示版本号"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="输出机器可读的 JSON 格式（智能体调用推荐）"
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="静默模式：只输出错误和最终结果"
+    ),
+    no_color: bool = typer.Option(
+        False, "--no-color", help="禁用彩色输出"
     ),
 ):
     """全局配置"""
+    OutputMode.reset()
+    OutputMode.json = json_output
+    OutputMode.quiet = quiet
+    OutputMode.no_color = no_color
+    # 重新初始化 console 以应用新设置
+    global console
+    console = get_console()
+
+    # 处理版本显示
+    if version:
+        if OutputMode.json:
+            print(json.dumps({"version": __version__}, ensure_ascii=False))
+        else:
+            console.print(f"qd-browser 版本: {__version__}")
+        raise typer.Exit()
+
+    # 如果没有子命令，显示帮助
+    if ctx.invoked_subcommand is None:
+        app(ctx, ["--help"])
 
 
 @app.command(name="url-download")
@@ -422,12 +578,22 @@ def url_download(
         )
 
     try:
-        asyncio.run(_process())
+        result = asyncio.run(_process())
+        if OutputMode.json:
+            if result:
+                OutputMode.set_result(result)
+            else:
+                OutputMode.set_result({"url": url, "status": "skipped"})
+            print_json_result()
     except Exception as e:
-        if settings.debug:
-            console.print_exception()
+        if OutputMode.json:
+            OutputMode.set_result({"url": url, "status": "failed", "error": str(e)})
+            print_json_result()
         else:
-            console.print(f"[red]错误: {e}[/red]")
+            if settings.debug:
+                console.print_exception()
+            else:
+                console.print(f"[red]错误: {e}[/red]")
         raise typer.Exit(1)
 
 
@@ -463,12 +629,23 @@ def domain_download(
         )
 
     try:
-        asyncio.run(_run())
+        result = asyncio.run(_run())
+        if OutputMode.json:
+            print_json_result()
     except Exception as e:
-        if settings.debug:
-            console.print_exception()
+        if OutputMode.json:
+            OutputMode.set_result({
+                "domain": domain,
+                "query": query,
+                "status": "failed",
+                "error": str(e),
+            })
+            print_json_result()
         else:
-            console.print(f"[red]错误: {e}[/red]")
+            if settings.debug:
+                console.print_exception()
+            else:
+                console.print(f"[red]错误: {e}[/red]")
         raise typer.Exit(1)
 
 
@@ -570,6 +747,15 @@ def web_download(
     console.print("[blue]========== 开始处理 ==========[/blue]")
     console.print(f"共 {len(filtered)} 个链接待处理")
 
+    result_data: dict[str, Any] = {
+        "query": query,
+        "total": len(filtered),
+        "success": 0,
+        "failed": 0,
+        "skipped": 0,
+        "url_results": [],
+    }
+
     async def _process_all():
         import tldextract
 
@@ -595,6 +781,11 @@ def web_download(
                         f"[yellow][{i}/{len(filtered)}] 跳过已访问 ({entry.status}): {url}[/yellow]"
                     )
                     skipped_count += 1
+                    result_data["url_results"].append({
+                        "url": url,
+                        "status": "skipped",
+                        "title": entry.title,
+                    })
                     continue
 
             console.print()
@@ -604,37 +795,58 @@ def web_download(
                 console.print(f"[blue][{i}/{len(filtered)}] 处理: {url}[/blue]")
 
             try:
-                await process_single_url(
+                url_result = await process_single_url(
                     url,
                     url_title=item.get("title", ""),
                     skip_visited=False,  # 这里已经检查过了
                     domain=url_domain,
                     search_date=item.get("date"),
                 )
+                if url_result:
+                    result_data["url_results"].append(url_result)
                 success_count += 1
             except Exception as e:
                 console.print(f"[red]处理失败: {e}[/red]")
                 fail_count += 1
+                result_data["url_results"].append({
+                    "url": url,
+                    "status": "failed",
+                    "error": str(e),
+                })
 
         # 显示统计
         console.print()
-        table = Table(title="处理统计")
-        table.add_column("项目", style="cyan")
-        table.add_column("数量", style="green")
-        table.add_row("总计", str(len(filtered)))
-        if skipped_count > 0:
-            table.add_row("跳过", str(skipped_count), style="yellow")
-        table.add_row("成功", str(success_count))
-        table.add_row("失败", str(fail_count))
-        console.print(table)
+        if not OutputMode.quiet:
+            table = Table(title="处理统计")
+            table.add_column("项目", style="cyan")
+            table.add_column("数量", style="green")
+            table.add_row("总计", str(len(filtered)))
+            if skipped_count > 0:
+                table.add_row("跳过", str(skipped_count), style="yellow")
+            table.add_row("成功", str(success_count))
+            table.add_row("失败", str(fail_count))
+            console.print(table)
+
+        result_data["success"] = success_count
+        result_data["failed"] = fail_count
+        result_data["skipped"] = skipped_count
 
     try:
         asyncio.run(_process_all())
+        if OutputMode.json:
+            OutputMode.set_result(result_data)
+            print_json_result()
     except Exception as e:
-        if settings.debug:
-            console.print_exception()
+        if OutputMode.json:
+            result_data["status"] = "failed"
+            result_data["error"] = str(e)
+            OutputMode.set_result(result_data)
+            print_json_result()
         else:
-            console.print(f"[red]错误: {e}[/red]")
+            if settings.debug:
+                console.print_exception()
+            else:
+                console.print(f"[red]错误: {e}[/red]")
         raise typer.Exit(1)
 
 
@@ -753,15 +965,23 @@ def llm_download_command(
             crawl_task_callback=crawl_task_callback,
         )
 
+        if OutputMode.json:
+            OutputMode.set_result(result)
+            print_json_result()
+
         if not result.get("success"):
             console.print(f"[red]失败: {result.get('error')}[/red]")
             raise typer.Exit(1)
 
     except Exception as e:
-        if settings.debug:
-            console.print_exception()
+        if OutputMode.json:
+            OutputMode.set_result({"success": False, "error": str(e)})
+            print_json_result()
         else:
-            console.print(f"[red]错误: {e}[/red]")
+            if settings.debug:
+                console.print_exception()
+            else:
+                console.print(f"[red]错误: {e}[/red]")
         raise typer.Exit(1)
 
 
@@ -795,19 +1015,30 @@ def config(
     init: bool = typer.Option(False, "--init", help="删除所有创建的输出目录，并清空所有历史记录"),
 ):
     """配置和历史记录管理"""
+    json_result: dict[str, Any] = {}
+
     # 显示配置
     if show_settings:
-        table = Table(title="qd-browser 配置")
-        table.add_column("配置项", style="cyan")
-        table.add_column("值", style="green")
-        for key, value in settings.model_dump().items():
-            table.add_row(key, str(value))
-        console.print(table)
-        console.print()
         config_dir = get_user_config_dir()
         history_path = config_dir / "visited.json"
-        console.print(f"配置目录: [cyan]{config_dir}[/cyan]")
-        console.print(f"历史记录: [cyan]{history_path}[/cyan]")
+        json_result = {
+            "settings": settings.model_dump(),
+            "config_dir": str(config_dir),
+            "history_path": str(history_path),
+        }
+        if not OutputMode.json:
+            table = Table(title="qd-browser 配置")
+            table.add_column("配置项", style="cyan")
+            table.add_column("值", style="green")
+            for key, value in settings.model_dump().items():
+                table.add_row(key, str(value))
+            console.print(table)
+            console.print()
+            console.print(f"配置目录: [cyan]{config_dir}[/cyan]")
+            console.print(f"历史记录: [cyan]{history_path}[/cyan]")
+        if OutputMode.json:
+            OutputMode.set_result(json_result)
+            print_json_result()
         return
 
     history = get_history()
@@ -815,35 +1046,49 @@ def config(
     # 列出创建的目录
     if show_dirs:
         created_dirs = history.get_created_dirs()
-        if not created_dirs:
-            console.print("[yellow]暂无创建的目录记录[/yellow]")
-            return
-        table = Table(title="创建的输出目录")
-        table.add_column("#", style="cyan")
-        table.add_column("目录路径", style="green")
-        for i, dir_path in enumerate(created_dirs, 1):
-            table.add_row(str(i), str(dir_path))
-        console.print(table)
+        json_result = {"created_dirs": [str(p) for p in created_dirs]}
+        if not OutputMode.json:
+            if not created_dirs:
+                console.print("[yellow]暂无创建的目录记录[/yellow]")
+            else:
+                table = Table(title="创建的输出目录")
+                table.add_column("#", style="cyan")
+                table.add_column("目录路径", style="green")
+                for i, dir_path in enumerate(created_dirs, 1):
+                    table.add_row(str(i), str(dir_path))
+                console.print(table)
+        if OutputMode.json:
+            OutputMode.set_result(json_result)
+            print_json_result()
         return
 
     # 统计
     if stats:
         stats_data = history.get_stats()
-        table = Table(title="访问历史统计")
-        table.add_column("项目", style="cyan")
-        table.add_column("数量", style="green")
-        table.add_row("总计", str(stats_data["total"]))
-        table.add_row("成功", str(stats_data["success"]))
-        table.add_row("失败", str(stats_data["failed"]))
-        table.add_row("跳过", str(stats_data["skipped"]))
-        console.print(table)
+        json_result = stats_data
+        if not OutputMode.json:
+            table = Table(title="访问历史统计")
+            table.add_column("项目", style="cyan")
+            table.add_column("数量", style="green")
+            table.add_row("总计", str(stats_data["total"]))
+            table.add_row("成功", str(stats_data["success"]))
+            table.add_row("失败", str(stats_data["failed"]))
+            table.add_row("跳过", str(stats_data["skipped"]))
+            console.print(table)
+        if OutputMode.json:
+            OutputMode.set_result(json_result)
+            print_json_result()
         return
 
     # 列出历史记录
     if show_history:
         all_urls = history.get_all_urls()
         if not all_urls:
-            console.print("[yellow]暂无历史记录[/yellow]")
+            if not OutputMode.json:
+                console.print("[yellow]暂无历史记录[/yellow]")
+            else:
+                OutputMode.set_result({"history": []})
+                print_json_result()
             return
         # 应用过滤条件
         from pathlib import Path
@@ -893,107 +1138,172 @@ def config(
 
         # 按时间倒序排列（最新的在前）
         sorted_items = sorted(filtered.items(), key=lambda x: x[1].visited_at, reverse=True)
-        table = Table(title="访问历史")
-        table.add_column("#", style="cyan")
-        table.add_column("URL", style="blue")
-        table.add_column("标题", style="green")
-        table.add_column("状态", style="yellow")
-        table.add_column("本地地址", style="magenta")
-        for i, (url, entry) in enumerate(sorted_items, 1):
-            status_style = {
-                "success": "green",
-                "failed": "red",
-                "skipped": "yellow",
-            }.get(entry.status, "white")
-            table.add_row(
-                str(i),
-                url,
-                entry.title or "",
-                f"[{status_style}]{entry.status}[/{status_style}]",
-                str(entry.local_path) if entry.local_path else "",
-            )
-        console.print(table)
+
+        # 构建 JSON 结果
+        history_list = []
+        for url, entry in sorted_items:
+            history_list.append({
+                "url": url,
+                "title": entry.title,
+                "status": entry.status,
+                "local_path": str(entry.local_path) if entry.local_path else None,
+                "visited_at": entry.visited_at.isoformat() if entry.visited_at else None,
+                "error": entry.error,
+                "page_date": entry.page_date,
+            })
+        json_result = {"history": history_list}
+
+        if not OutputMode.json:
+            table = Table(title="访问历史")
+            table.add_column("#", style="cyan")
+            table.add_column("URL", style="blue")
+            table.add_column("标题", style="green")
+            table.add_column("状态", style="yellow")
+            table.add_column("本地地址", style="magenta")
+            for i, (url, entry) in enumerate(sorted_items, 1):
+                status_style = {
+                    "success": "green",
+                    "failed": "red",
+                    "skipped": "yellow",
+                }.get(entry.status, "white")
+                table.add_row(
+                    str(i),
+                    url,
+                    entry.title or "",
+                    f"[{status_style}]{entry.status}[/{status_style}]",
+                    str(entry.local_path) if entry.local_path else "",
+                )
+            console.print(table)
+        else:
+            OutputMode.set_result(json_result)
+            print_json_result()
         return
 
     # 移除 URL
     if remove_url is not None:
-        if history.remove_url(remove_url):
-            console.print(f"[green]已移除: {remove_url}[/green]")
-        else:
-            console.print(f"[yellow]URL 不在历史记录中: {remove_url}[/yellow]")
+        removed = history.remove_url(remove_url)
+        json_result = {"url": remove_url, "removed": removed}
+        if not OutputMode.json:
+            if removed:
+                console.print(f"[green]已移除: {remove_url}[/green]")
+            else:
+                console.print(f"[yellow]URL 不在历史记录中: {remove_url}[/yellow]")
+        if OutputMode.json:
+            OutputMode.set_result(json_result)
+            print_json_result()
         return
 
     # 移除指定域名的所有 URL
     if remove_site is not None:
-        confirm = typer.confirm(f"确定要移除域名 {remove_site} 的所有历史记录吗？")
-        if not confirm:
-            console.print("[yellow]已取消[/yellow]")
-            return
+        if not OutputMode.json:
+            confirm = typer.confirm(f"确定要移除域名 {remove_site} 的所有历史记录吗？")
+            if not confirm:
+                console.print("[yellow]已取消[/yellow]")
+                return
         count = history.remove_by_domain(remove_site)
-        if count > 0:
-            console.print(f"[green]已移除 {count} 条 {remove_site} 的记录[/green]")
-        else:
-            console.print(f"[yellow]未找到 {remove_site} 的记录[/yellow]")
+        json_result = {"site": remove_site, "removed_count": count}
+        if not OutputMode.json:
+            if count > 0:
+                console.print(f"[green]已移除 {count} 条 {remove_site} 的记录[/green]")
+            else:
+                console.print(f"[yellow]未找到 {remove_site} 的记录[/yellow]")
+        if OutputMode.json:
+            OutputMode.set_result(json_result)
+            print_json_result()
         return
 
     # 移除指定输出目录的所有 URL
     if remove_output_dir is not None:
-        confirm = typer.confirm(f"确定要移除输出目录 {remove_output_dir} 的所有历史记录吗？")
-        if not confirm:
-            console.print("[yellow]已取消[/yellow]")
-            return
+        if not OutputMode.json:
+            confirm = typer.confirm(f"确定要移除输出目录 {remove_output_dir} 的所有历史记录吗？")
+            if not confirm:
+                console.print("[yellow]已取消[/yellow]")
+                return
         count = history.remove_by_output_dir(remove_output_dir)
-        if count > 0:
-            console.print(f"[green]已移除 {count} 条 {remove_output_dir} 的记录[/green]")
-        else:
-            console.print(f"[yellow]未找到 {remove_output_dir} 的记录[/yellow]")
+        json_result = {"output_dir": remove_output_dir, "removed_count": count}
+        if not OutputMode.json:
+            if count > 0:
+                console.print(f"[green]已移除 {count} 条 {remove_output_dir} 的记录[/green]")
+            else:
+                console.print(f"[yellow]未找到 {remove_output_dir} 的记录[/yellow]")
+        if OutputMode.json:
+            OutputMode.set_result(json_result)
+            print_json_result()
         return
 
     # 移除指定状态的所有 URL
     if remove_status is not None:
-        confirm = typer.confirm(f"确定要移除状态为 {remove_status} 的所有历史记录吗？")
-        if not confirm:
-            console.print("[yellow]已取消[/yellow]")
-            return
+        if not OutputMode.json:
+            confirm = typer.confirm(f"确定要移除状态为 {remove_status} 的所有历史记录吗？")
+            if not confirm:
+                console.print("[yellow]已取消[/yellow]")
+                return
         count = history.remove_by_status(remove_status)
-        if count > 0:
-            console.print(f"[green]已移除 {count} 条 {remove_status} 的记录[/green]")
-        else:
-            console.print(f"[yellow]未找到 {remove_status} 的记录[/yellow]")
+        json_result = {"status": remove_status, "removed_count": count}
+        if not OutputMode.json:
+            if count > 0:
+                console.print(f"[green]已移除 {count} 条 {remove_status} 的记录[/green]")
+            else:
+                console.print(f"[yellow]未找到 {remove_status} 的记录[/yellow]")
+        if OutputMode.json:
+            OutputMode.set_result(json_result)
+            print_json_result()
         return
 
     # 移除创建的目录记录（不删除目录本身）
     if remove_created_dir is not None:
-        if history.remove_created_dir(remove_created_dir):
-            console.print(f"[green]已从创建目录记录中移除: {remove_created_dir}[/green]")
-        else:
-            console.print(f"[yellow]目录不在创建记录中: {remove_created_dir}[/yellow]")
+        removed = history.remove_created_dir(remove_created_dir)
+        json_result = {"created_dir": remove_created_dir, "removed": removed}
+        if not OutputMode.json:
+            if removed:
+                console.print(f"[green]已从创建目录记录中移除: {remove_created_dir}[/green]")
+            else:
+                console.print(f"[yellow]目录不在创建记录中: {remove_created_dir}[/yellow]")
+        if OutputMode.json:
+            OutputMode.set_result(json_result)
+            print_json_result()
         return
 
     # 清空历史记录并删除创建的目录
     if init:
-        confirm = typer.confirm("确定要删除所有创建的输出目录，并清空所有历史记录吗？")
-        if not confirm:
-            console.print("[yellow]已取消[/yellow]")
-            return
+        if not OutputMode.json:
+            confirm = typer.confirm("确定要删除所有创建的输出目录，并清空所有历史记录吗？")
+            if not confirm:
+                console.print("[yellow]已取消[/yellow]")
+                return
         # 先删除所有创建的目录
         import shutil
         created_dirs = history.get_created_dirs()
         deleted_count = 0
+        deleted_dirs = []
+        failed_dirs = []
         for dir_path in created_dirs:
             try:
                 if dir_path.exists():
                     shutil.rmtree(dir_path)
-                    console.print(f"[green]已删除目录: {dir_path}[/green]")
                     deleted_count += 1
+                    deleted_dirs.append(str(dir_path))
+                    if not OutputMode.json:
+                        console.print(f"[green]已删除目录: {dir_path}[/green]")
             except Exception as e:
-                console.print(f"[red]删除目录失败 {dir_path}: {e}[/red]")
+                failed_dirs.append({"path": str(dir_path), "error": str(e)})
+                if not OutputMode.json:
+                    console.print(f"[red]删除目录失败 {dir_path}: {e}[/red]")
         # 再清空历史记录
         history.clear()
-        if deleted_count > 0:
-            console.print(f"[green]已删除 {deleted_count} 个目录，历史记录已清空[/green]")
-        else:
-            console.print("[green]历史记录已清空[/green]")
+        json_result = {
+            "deleted_count": deleted_count,
+            "deleted_dirs": deleted_dirs,
+            "failed_dirs": failed_dirs,
+        }
+        if not OutputMode.json:
+            if deleted_count > 0:
+                console.print(f"[green]已删除 {deleted_count} 个目录，历史记录已清空[/green]")
+            else:
+                console.print("[green]历史记录已清空[/green]")
+        if OutputMode.json:
+            OutputMode.set_result(json_result)
+            print_json_result()
         return
 
     # 默认显示帮助

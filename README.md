@@ -17,6 +17,7 @@
 - **URL 去重**: 全局访问历史记录，支持跳过已访问 URL
 - **自动域名子目录**: 自动从 URL 解析域名作为输出子目录
 - **智能 LLM 爬取**: 使用 NVIDIA 免费模型（Llama 3.1 等）理解用户意图，自动提取搜索关键词、域名列表和输出目录，然后调用 domain-download 进行批量爬取，不花一分钱！
+- **智能体友好**: 支持 `--json`、`--quiet`、`--no-color` 选项，方便被 AI 智能体调用，通过 stdout/stderr 获取结构化结果
 
 ## 安装
 
@@ -121,6 +122,40 @@ uv run qd-browser url-download --debug https://example.com
 
 # 不跳过已访问的 URL（强制重新处理）
 uv run qd-browser url-download --not-skip https://example.com
+```
+
+### 智能体调用（AI Agent）
+
+qd-browser 专为 AI 智能体调用优化，提供机器可读的 JSON 输出：
+
+```bash
+# JSON 模式：输出结构化结果（推荐智能体使用）
+uv run qd-browser --json url-download https://example.com
+
+# 静默模式：只输出 JSON，减少噪音
+uv run qd-browser --json --quiet url-download https://example.com
+
+# 禁用颜色输出
+uv run qd-browser --json --no-color config --stats
+
+# 获取配置信息（JSON）
+uv run qd-browser --json config --settings
+
+# 获取历史记录统计（JSON）
+uv run qd-browser --json config --stats
+```
+
+JSON 输出示例：
+```json
+{
+  "url": "https://example.com",
+  "status": "success",
+  "type": "page",
+  "title": "示例页面",
+  "local_path": "/path/to/output/example.com/page.md",
+  "attachment_count": 2,
+  "attachments": [...]
+}
 ```
 
 ### 命令说明

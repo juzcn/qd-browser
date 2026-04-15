@@ -26,6 +26,7 @@
 6. **URL 去重**: 全局历史记录，支持跳过已访问 URL ✅
 7. **智能 LLM 爬取**: 使用 NVIDIA 免费大模型理解用户自然语言需求，自动提取搜索关键词、域名列表和输出目录，然后调用 domain-download 进行批量爬取，不花一分钱！✅
 8. **动态模型池**: 从 NVIDIA API 自动获取当前可用模型 ✅
+9. **智能体友好模式**: 支持 `--json`、`--quiet`、`--no-color` 全局选项，所有命令输出机器可读 JSON，方便 AI 智能体通过 stdout/stderr 调用 ✅
 
 ## CLI 配置
 - **总是使用无头浏览器**: 无 --headless 选项
@@ -36,6 +37,10 @@
 - **调试模式**: --debug 选项，仅在子命令中使用，不从环境变量读取
 - **默认跳过已访问**: 默认跳过历史记录中已访问的 URL，使用 --not-skip 强制重新处理
 - **自动域名子目录**: 自动从 URL 解析域名作为输出子目录（不带 www 前缀）
+- **智能体友好全局选项**（所有命令通用）:
+  - `--json`: 输出机器可读的 JSON 格式
+  - `--quiet` / `-q`: 静默模式，只输出错误和最终结果
+  - `--no-color`: 禁用彩色输出
 
 ## 已实现模块
 - `cli.py`: CLI 命令行入口，提供 `url-download`、`domain-download`、`web-download`、`llm-download`、`config` 命令
@@ -91,3 +96,4 @@ uv run qd-browser config --init
 ## 开发历史
 - 2026-04-10: first release
 - 2026-04-11: 添加 llm-download 命令、动态模型池、智能爬取任务、发布到 PyPI
+- 2026-04-15: 添加智能体友好模式（--json、--quiet、--no-color），所有命令支持机器可读 JSON 输出
